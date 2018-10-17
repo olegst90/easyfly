@@ -4,9 +4,10 @@
 *********/
 
 // Load Wi-Fi library
+#include <list>
 #include <ESP8266WiFi.h>
 #include <WiFiUdp.h>
-#include <list>
+#include <ArduCAM.h>
 #include <pt.h>
 #include "aeproto.h"
 #include "Camera.h"
@@ -29,7 +30,7 @@ const char* password = "5Mqmx325Mqmx32";
 int16_t server_port = 80;
 
 WiFiUDP Udp;
-Camera camera(8, 8);
+Camera camera(32, 32);
 
 PT_THREAD(camera_thread(struct thr_ctx *ctx));
 PT_THREAD(stream_thread(struct thr_ctx *ctx));
@@ -37,6 +38,7 @@ PT_THREAD(stream_thread(struct thr_ctx *ctx));
 list<thr_ctx> threads;
 
 void setup() {
+  randomSeed(analogRead(0));
   Serial.begin(9600);
   // Set output power to max
   WiFi.setOutputPower(20.5);
@@ -64,38 +66,66 @@ void setup() {
   threads.push_back(ctx);
 }
 
+struct stream_ctx {
+  int id;
+  int info_counter;
+  int alive_counter;
+  int frame_i;
+  int frame_count;
+};
+
 PT_THREAD(stream_thread(struct thr_ctx *ctx))
 {
   req_pkg pkg;
-  
+  int remainder;
+    
   PT_BEGIN(&ctx->pt);
 
-  //ctx->user_data = 
+  ctx->user_data = new struct stream_ctx;
+
+#define L ((struct stream_ctx *)ctx->user_data)  
+
+  L->info_counter = 10;
+  L->alive_counter = 20;
+  L->id = random(1024);
 
   do {
     // frame info
-    
-    memset(&pkg, 0, sizeof(pkg));
-    pkg.cmd = REQ_ID_STREAM_INFO;
-    pkg.payload.stream_info.width = camera.width();
-    pkg.payload.stream_info.height = camera.height();
-    Udp.beginPacket(ctx->ip, ctx->port);
-    Udp.write((uint8_t *)&pkg, sizeof(pkg));
-    Udp.endPacket();
-     
-    PT_YIELD(&ctx->pt);
-          
+    if (--L->info_counter <= 0) {
+      Serial.println("sending info");   
+      memset(&pkg, 0, sizeof(pkg));
+      pkg.cmd = REQ_ID_STREAM_INFO;
+      pkg.payload.stream_info.id = L->id;
+      pkg.payload.stream_info.width = camera.width();
+      pkg.payload.stream_info.height = camera.height();
+      pkg.payload.stream_info.size = camera.frameSize();
+      Udp.beginPacket(ctx->ip, ctx->port);
+      Udp.write((uint8_t *)&pkg, sizeof(pkg));
+      Udp.endPacket();
+      L->info_counter = 20;
+      PT_YIELD(&ctx->pt);
+    } 
     // frame proper
-    memset(&pkg, 0, sizeof(pkg));
-    pkg.cmd = REQ_ID_STREAM_FRAME;
-    pkg.payload.frame_size = camera.frameSize();
-    Udp.beginPacket(ctx->ip, ctx->port);
-    Udp.write((uint8_t *)&pkg, sizeof(pkg));
-    Udp.write(camera.raw(), 30);//camera.frameSize());
-    Udp.endPacket();
-    
-    PT_YIELD(&ctx->pt);
-  } while (true);
+    Serial.println("sending frame");
+    L->frame_count = camera.frameSize() / MAX_PAYLOAD_SIZE;
+    for (L->frame_i = 0; L->frame_i < L->frame_count; L->frame_i++) {
+      memset(&pkg, 0, sizeof(pkg));
+      pkg.cmd = REQ_ID_STREAM_FRAME;
+      remainder = camera.frameSize() - L->frame_i * MAX_PAYLOAD_SIZE;
+      pkg.payload.frame.fragment_size = remainder < MAX_PAYLOAD_SIZE ? remainder : MAX_PAYLOAD_SIZE;
+      pkg.payload.frame.total_size = camera.frameSize();
+      pkg.payload.frame.offset = L->frame_i * MAX_PAYLOAD_SIZE;
+      pkg.payload.frame.fragment_id = L->frame_i; 
+      pkg.payload.frame.stream_id = ((struct stream_ctx *)ctx->user_data)->id;
+      Udp.beginPacket(ctx->ip, ctx->port);
+      Udp.write((uint8_t *)&pkg, sizeof(pkg));
+      Udp.write(camera.raw() + pkg.payload.frame.offset, pkg.payload.frame.fragment_size);
+      Udp.endPacket();
+      PT_YIELD(&ctx->pt);
+    }
+  } while (--((struct stream_ctx *)ctx->user_data)->alive_counter > 0);
+
+  Serial.printf("Terminating abandoning stream %d\n", ((struct stream_ctx *)ctx->user_data)->id);
   
   PT_END(&ctx->pt);
 }
@@ -146,6 +176,16 @@ void loop(){
       ctx.thread = &stream_thread;
       PT_INIT(&ctx.pt);
       threads.push_back(ctx);
+    } else if (pkg.cmd == REQ_ID_PING_STREAM) {
+      Serial.printf("Ping stream %d\n", pkg.payload.stream_ping.id);
+      for (list<thr_ctx>::iterator i = threads.begin(); i != threads.end(); ++i) {
+        if (i->thread == &stream_thread
+            && ((struct stream_ctx *)i->user_data)->id == pkg.payload.stream_ping.id) {
+              Serial.println("....stream found");
+              ((struct stream_ctx *)i->user_data)->alive_counter = 20;
+              break;
+        }
+      }
     }
   }
   
@@ -159,4 +199,5 @@ void loop(){
       }
     }
   }
+  delay(5);
 }

@@ -53,7 +53,7 @@ int main(int argc, char **argv)
     printf("Waiting for data...\n");
 
     int recv_len;
-
+    int repeat_counter = 10; 
     do {
         int si_remote_size = sizeof(si_remote);
         recv_len = recvfrom(sock, buffer, sizeof(buffer), 0,
@@ -66,15 +66,33 @@ int main(int argc, char **argv)
         //printf("received %d bytes\n", recv_len);
         switch (pkg->cmd) {
         case REQ_ID_STREAM_INFO:
-            printf("<stream_info:%d x %d>\n", pkg->payload.stream_info.width, pkg->payload.stream_info.height);
+            printf("<stream_info:id %d, %d x %d, %d bytes frame>\n", 
+                                                     pkg->payload.stream_info.id,
+                                                     pkg->payload.stream_info.width,
+                                                     pkg->payload.stream_info.height,
+                                                     pkg->payload.stream_info.size);
             break;
         case REQ_ID_STREAM_FRAME:
-            if (sizeof(buffer) < sizeof(*pkg) + pkg->payload.frame_size) {
+            if (sizeof(buffer) < sizeof(*pkg) + pkg->payload.frame.fragment_size) {
                 fprintf(stderr, "Buffer is too small\n");
                 continue;
             }
-            printf("<frame:%d bytes >\n", pkg->payload.frame_size);
+            printf("<frame:stream %d %d bytes offset %d>\n", pkg->payload.frame.stream_id,
+                                                             pkg->payload.frame.fragment_size,
+                                                             pkg->payload.frame.offset);
             break;
+        }
+        if (--repeat_counter <= 0) {
+            printf("pinging stream %d\n", pkg->payload.stream_info.id);
+            pkg->cmd = REQ_ID_PING_STREAM;
+            
+            res = sendto(sock, pkg, sizeof(*pkg), 0,
+                         (struct sockaddr_in *)&si_remote, sizeof(si_remote));
+            if (res == -1) {
+                fprintf(stderr, "Could not send to server: %s\n", strerror(errno));
+                goto exit;
+            }
+            repeat_counter = 10;
         }
 
     } while (1);
