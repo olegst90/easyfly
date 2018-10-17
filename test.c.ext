@@ -6,6 +6,26 @@
 #include "string.h"
 #include "aeproto.h"
 
+int write_ppm(const uint8_t *buffer, int dimx, int dimy, const char *path)
+{
+  int i, j;
+  FILE *fp = fopen(path, "wb"); 
+  (void) fprintf(fp, "P6\n%d %d\n255\n", dimx, dimy);
+  for (j = 0; j < dimy; ++j)
+  {
+    for (i = 0; i < dimx; ++i)
+    {
+      static unsigned char color[3];
+      color[0] = buffer[j*dimy + i];  /* red */
+      color[1] = buffer[j*dimy + i];  /* green */
+      color[2] = buffer[j*dimy + i];  /* blue */
+      (void) fwrite(color, 1, 3, fp);
+    }
+  }
+  (void) fclose(fp);
+  return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 3) {
@@ -38,7 +58,10 @@ int main(int argc, char **argv)
     si_remote.sin_port = htons(atoi(argv[2]));
     inet_pton(AF_INET, argv[1], &(si_remote.sin_addr));
 
-    uint8_t buffer[4096*4];
+    uint8_t buffer[64];
+    uint8_t *frame = NULL;
+    int frame_size = 0;
+    int frame_width, frame_height;
     req_pkg *pkg = (req_pkg *)buffer;
     memset(pkg, 0, sizeof(pkg));
     pkg->cmd = REQ_ID_GET_STREAM;
@@ -71,6 +94,11 @@ int main(int argc, char **argv)
                                                      pkg->payload.stream_info.width,
                                                      pkg->payload.stream_info.height,
                                                      pkg->payload.stream_info.size);
+            frame_size = pkg->payload.stream_info.size;
+            if (frame) free(frame);
+            frame = (uint8_t *)malloc(frame_size);
+            frame_width = pkg->payload.stream_info.width;
+            frame_height = pkg->payload.stream_info.height;
             break;
         case REQ_ID_STREAM_FRAME:
             if (sizeof(buffer) < sizeof(*pkg) + pkg->payload.frame.fragment_size) {
@@ -80,6 +108,21 @@ int main(int argc, char **argv)
             printf("<frame:stream %d %d bytes offset %d>\n", pkg->payload.frame.stream_id,
                                                              pkg->payload.frame.fragment_size,
                                                              pkg->payload.frame.offset);
+            if (pkg->payload.frame.offset 
+                 + pkg->payload.frame.fragment_size > frame_size ) {
+                fprintf(stderr, "Insufficient buffer\n");
+                continue;
+            } 
+
+            memcpy(frame + pkg->payload.frame.offset, 
+                   buffer + sizeof(*pkg), 
+                   pkg->payload.frame.fragment_size);
+            if (pkg->payload.frame.offset + 
+                pkg->payload.frame.fragment_size == frame_size) {
+                //printf("...full frame received:\n%*s\n", frame_size, (const char *)frame);   
+                write_ppm(frame, frame_width, frame_height, "pic.ppm");
+                goto exit;
+            }
             break;
         }
         if (--repeat_counter <= 0) {
@@ -98,6 +141,7 @@ int main(int argc, char **argv)
     } while (1);
 
 exit:
+    if (frame) free(frame);
     close(sock);
     return res;
 }

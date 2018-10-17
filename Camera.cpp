@@ -7,7 +7,11 @@ Camera::Camera(int width, int height)
   __data = new uint8_t[__frameSize];
   for (int i = 0; i < __frameSize; i++)
   {
-    __data[i] = 0x42;
+    __data[i] = 0;
+  }
+  for (int i = 0; i < width; i++)
+  {
+    __data[i] = 0xff;
   }
   __width = width;
   __height = height;
