@@ -11,16 +11,7 @@
 #include <errno.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-
-#define PACKET_BUFFER_SIZE  4096
-#define AIO_BUFFER_SIZE     256
-
-struct ring_buffer {
-    unsigned char *buffer;
-    size_t capacity; 
-    size_t size;
-    size_t offset;
-};
+#include <proto_serial.h>
 
 struct tr_ctx {
     union {
@@ -30,8 +21,7 @@ struct tr_ctx {
             struct sockaddr_in si_remote;
         } network;
         struct {
-            struct aiocb aio;
-            struct ring_buffer rb;
+            int fd;
         } serial;
     } data;
     ssize_t (*write)(struct tr_ctx *ctx, const unsigned char *data, size_t data_size);
@@ -39,143 +29,108 @@ struct tr_ctx {
     void (*destroy)(struct tr_ctx *ctx);
 };
 
-static int rb_init(struct ring_buffer *rb, size_t capacity) 
-{
-    rb->buffer = malloc(capacity);
-    if (!rb->buffer) {
-        fprintf(stderr, "Could not allocate ring buffer\n");
-        return -1;
-    }
-    rb->size = 0;
-    rb->offset = 0;
-    rb->capacity = capacity;
-    return 0;
-}
 
-static int rb_write(struct ring_buffer *rb, const volatile unsigned char *data, size_t data_size) 
-{
-    if (rb->size + data_size > rb->capacity) {
-        fprintf(stderr,"rb overflow\n");
-        return -1;
-    }
-    size_t i0 = rb->offset + rb->size;
-    for (int i = 0; i < data_size; i++) {
-        rb->buffer[(i0 + i) % rb->capacity] = data[i];
-    }
-    rb->size += data_size;
-    return 0;
-}
-
-static int rb_read(struct ring_buffer *rb, volatile unsigned char *data, size_t data_size) 
-{
-    if (rb->size < data_size) {
-        fprintf(stderr,"rb doesn't have so much\n");
-        return -1;
-    }
-    if (!data) {
-        for (int i = 0; i < data_size; i++) {
-            data[i] = rb->buffer[(rb->offset + i) % rb->capacity];
+void DumpHex(const void* data, size_t size) {
+    char ascii[17];
+    size_t i, j;
+    ascii[16] = '\0';
+    for (i = 0; i < size; ++i) {
+        printf("%02X ", ((unsigned char*)data)[i]);
+        if (((unsigned char*)data)[i] >= ' ' && ((unsigned char*)data)[i] <= '~') {
+            ascii[i % 16] = ((unsigned char*)data)[i];
+        } else {
+            ascii[i % 16] = '.';
         }
-    }
-    rb->size -= data_size;
-    rb->offset += data_size;
-    return 0;
-}
-
-static void rb_destroy(struct ring_buffer *rb) 
-{
-    free(rb->buffer);
-}
-
-static size_t rb_available_space(struct ring_buffer *rb) 
-{
-    return rb->capacity - rb->size;
-}
-
-static size_t rb_available_data(struct ring_buffer *rb) 
-{
-    return rb->size;
-}
-
-static void aio_handler(int sig, siginfo_t *si, void *ucontext)
-{
-    printf("%s\n", __FUNCTION__);
-    struct tr_ctx *ctx = si->si_value.sival_ptr;
-    ssize_t bytes = aio_return(&ctx->data.serial.aio); 
-    if (bytes == -1) {
-        fprintf(stderr, "aio returned error\n");
-        // TODO: cleanup
-        exit(-1);
-    }
-
-    if (rb_available_space(&ctx->data.serial.rb) < bytes + sizeof(bytes)) {
-        fprintf(stderr, "buffer is full, discarding packet\n");
-    } else {
-        if (rb_write(&ctx->data.serial.rb, (unsigned char *)&bytes, sizeof(bytes)) != 0) {
-            fprintf(stderr, "can't write to rb\n");
-            goto read_next;
-        }
-        if (rb_write(&ctx->data.serial.rb, ctx->data.serial.aio.aio_buf, bytes) != 0) {
-            fprintf(stderr, "can't write to rb\n");
-            goto read_next;
-        }
-    }
-read_next:
-    if (aio_read(&ctx->data.serial.aio) == -1) {
-        fprintf(stderr, "could not restart operation, fatal error!\n");
-        // TODO: clean-up
-        exit(-1);
+        if ((i+1) % 8 == 0 || i+1 == size) {
+            printf(" ");
+            if ((i+1) % 16 == 0) {
+                printf("|  %s \n", ascii);
+            } else if (i+1 == size) {
+                ascii[(i+1) % 16] = '\0';
+                if ((i+1) % 16 <= 8) {
+                    printf(" ");
+                }
+                for (j = (i+1) % 16; j < 16; ++j) {
+                    printf("   ");
+                }
+                printf("|  %s \n", ascii);
+            }
+       }
     }
 }
-
 static ssize_t __write_serial(struct tr_ctx *ctx, const unsigned char *data, size_t data_size)
 {
-    return write(ctx->data.serial.aio.aio_fildes, data, data_size);
+    uint8_t b = AE_START;
+    write(ctx->data.serial.fd, &b, 1);
+    uint32_t u32 = AE_MAGIC;
+    write(ctx->data.serial.fd, (char *)&u32, sizeof(u32));
+    u32 = data_size;
+    write(ctx->data.serial.fd, (char *)&u32, sizeof(u32));
+    size_t res = write(ctx->data.serial.fd, data, data_size);
+    tcdrain(ctx->data.serial.fd);
+    return res;
 }
 
 static ssize_t __read_serial(struct tr_ctx *ctx, unsigned char *data, size_t data_size)
 {
-    while (rb_available_data(&ctx->data.serial.rb) < sizeof(size_t) + 1);
-    if (aio_cancel(ctx->data.serial.aio.aio_fildes, &ctx->data.serial.aio) == AIO_NOTCANCELED) {
-        while (aio_error(&ctx->data.serial.aio) == EINPROGRESS);
+    uint32_t u32;
+    uint8_t b;
+    while (1) {
+        if (read(ctx->data.serial.fd, (unsigned char *)&b, sizeof(b)) != sizeof(b)) {
+            fprintf(stderr, "Can't read start byte: %s\n", strerror(errno));
+            return -1;
+        }
+        if (b != AE_START) {
+            fprintf(stderr, "Bad start byte %2x\n",(int)b);
+            continue;
+        }
+        if (read(ctx->data.serial.fd, (unsigned char *)&u32, sizeof(u32)) != sizeof(u32)) {
+            fprintf(stderr, "Can't read magic lo: %s\n", strerror(errno));
+            return -1;
+        }
+        if (u32 != AE_MAGIC) {
+            fprintf(stderr, "Bad magic\n");
+            DumpHex(&u32, sizeof(u32));
+            continue;
+        }
+        if (read(ctx->data.serial.fd, (unsigned char *)&u32, sizeof(u32)) != sizeof(u32)) {
+            fprintf(stderr, "Can't read packet size %s\n", strerror(errno));
+            return -1;
+        }
+        size_t to_read = u32 > data_size? data_size : u32; 
+        ssize_t res = read(ctx->data.serial.fd, data, to_read);
+        if (res == -1) {
+            fprintf(stderr, "Can't read data:  %s\n", strerror(errno));
+            return -1;
+        }
+        //discard the rest of the packet
+        if (u32 > data_size) {
+            char *tmp = malloc(u32 - data_size);
+            read(ctx->data.serial.fd, tmp, u32 - data_size);
+            free(tmp);
+        }
+        return res;
     }
-    size_t bytes, bytes_total;
-    // read packet size
-    rb_read(&ctx->data.serial.rb, (volatile unsigned char *)&bytes_total, sizeof(bytes_total));
-    if (bytes_total > data_size) {
-        bytes = data_size;
-    } else {
-        bytes = bytes_total;
-    }
-    // packet body
-    rb_read(&ctx->data.serial.rb, data, bytes);
-    // discard the rest 
-    rb_read(&ctx->data.serial.rb, data, bytes_total - bytes);
-
-    aio_read(&ctx->data.serial.aio);
-    return bytes;
 }
 
 static void __destroy_serial(struct tr_ctx *ctx)
 {
     if (ctx) {
-        close(ctx->data.serial.aio.aio_fildes);
-        if (ctx->data.serial.aio.aio_buf)
-            free(ctx->data.serial.aio.aio_buf);
-        rb_destroy(&ctx->data.serial.rb);
+        close(ctx->data.serial.fd);
         free(ctx);
     }
 }
 
 static thandle __init_serial(struct tr_param *param)
 {
-    int fd = open(param->value.serial.path, O_RDWR | O_NOCTTY);
+    int fd = open(param->value.serial.path, O_RDWR | O_NOCTTY | O_NDELAY);
     if (fd == -1) {
         fprintf(stderr, "Could not open serial %s: %s\n", 
                 param->value.serial.path,
                 strerror(errno));
         return NULL;
     }
+    fcntl(fd, F_SETFL, 0);
     struct termios tty;
     int res = tcgetattr(fd, &tty);
     if (res == -1) {
@@ -184,16 +139,16 @@ static thandle __init_serial(struct tr_param *param)
         return NULL;
     }
 
-    cfsetospeed(&tty, (speed_t)param->value.serial.baudrate);
-    cfsetispeed(&tty, (speed_t)param->value.serial.baudrate);
+    cfsetospeed(&tty, (speed_t)B9600);//param->value.serial.baudrate);
+    cfsetispeed(&tty, (speed_t)B9600);//param->value.serial.baudrate);
 
     cfmakeraw(&tty);
 
     tty.c_cc[VMIN] = 1;
-    tty.c_cc[VTIME] = 10;
+    tty.c_cc[VTIME] = 0;
 
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CRTSCTS;    /* no HW flow control? */
+    //tty.c_cflag &= ~CSTOPB;
+    //tty.c_cflag &= ~CRTSCTS;    /* no HW flow control? */
     tty.c_cflag |= CLOCAL | CREAD;
     res = tcsetattr(fd, TCSANOW, &tty);
     if (res == -1) {
@@ -206,30 +161,7 @@ static thandle __init_serial(struct tr_param *param)
         goto error;
     }
 
-    if (!rb_init(&h->data.serial.rb, PACKET_BUFFER_SIZE)) {
-        fprintf(stderr, "can't init rb\n");
-        goto error;
-    }
-
-    struct sigaction sa;
-    sa.sa_flags = SA_RESTART | SA_SIGINFO;
-    sa.sa_sigaction = &aio_handler;
-    if (sigaction(SIGCHLD, &sa, NULL) == -1) {
-        fprintf(stderr, "could not set sighandler: %s\n", strerror(errno));
-        goto error;
-    }
-
-    h->data.serial.aio.aio_fildes = fd;
-    h->data.serial.aio.aio_buf = malloc(AIO_BUFFER_SIZE);
-    h->data.serial.aio.aio_nbytes = AIO_BUFFER_SIZE;
-    h->data.serial.aio.aio_sigevent.sigev_notify = SIGEV_SIGNAL;
-    h->data.serial.aio.aio_sigevent.sigev_signo = SIGCHLD;
-    h->data.serial.aio.aio_sigevent.sigev_value.sival_ptr = h;
-
-    if (aio_read(&h->data.serial.aio) == -1) {
-        fprintf(stderr, "Could not start aio io: %s\n", strerror(errno));
-        goto error;
-    }
+    h->data.serial.fd = fd;
 
     h->write = &__write_serial;
     h->read = &__read_serial;
@@ -238,13 +170,9 @@ static thandle __init_serial(struct tr_param *param)
     return h;
 error:
     if (h) {
-        close(h->data.serial.aio.aio_fildes);
-        if (h->data.serial.aio.aio_buf)
-            free(h->data.serial.aio.aio_buf);
-        rb_destroy(&h->data.serial.rb);
+        close(h->data.serial.fd);
         free(h);
     }
-    // TODO: restore signal handler
     return NULL;    
 }
 

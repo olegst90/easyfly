@@ -27,16 +27,23 @@ int write_ppm(const uint8_t *buffer, int dimx, int dimy, const char *path)
 
 int main(int argc, char **argv)
 {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s ip port\n", argv[0]);
+    if (argc != 4) {
+        fprintf(stderr, "Usage: %s n <ip> <port>\n"
+                        "       %s s <serial> <baudrate>", argv[0]);
         return -1;
     }
 
     struct tr_param tr = {0};
-    tr.type = TR_NETWORK;
-    tr.value.network.remote_ip = argv[1];
-    tr.value.network.remote_port = atoi(argv[2]);
-    tr.value.network.local_port = 45123;
+    if (strcmp(argv[1],"s") == 0) {
+        tr.type = TR_SERIAL;
+        tr.value.serial.path = argv[2];
+        tr.value.serial.baudrate = atoi(argv[3]);
+    } else if (strcmp(argv[1],"n") == 0) {
+        tr.type = TR_NETWORK;
+        tr.value.network.remote_ip = argv[2];
+        tr.value.network.remote_port = atoi(argv[3]);
+        tr.value.network.local_port = 45123;
+    }
     thandle h = tr_init(&tr);
     if (!h) {
         fprintf(stderr, "Connection failure\n");
@@ -92,7 +99,8 @@ int main(int argc, char **argv)
                                                              pkg->payload.frame.offset);
             if (pkg->payload.frame.offset 
                  + pkg->payload.frame.fragment_size > frame_size ) {
-                fprintf(stderr, "Insufficient buffer\n");
+                fprintf(stderr, "Insufficient buffer: need %d, has %d\n",
+                                  pkg->payload.frame.offset + pkg->payload.frame.fragment_size, frame_size);
                 continue;
             } 
 
@@ -101,7 +109,6 @@ int main(int argc, char **argv)
                    pkg->payload.frame.fragment_size);
             if (pkg->payload.frame.offset + 
                 pkg->payload.frame.fragment_size == frame_size) {
-                //printf("...full frame received:\n%*s\n", frame_size, (const char *)frame);   
                 write_ppm(frame, frame_width, frame_height, "pic.ppm");
                 goto exit;
             }

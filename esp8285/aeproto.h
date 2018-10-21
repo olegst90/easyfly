@@ -22,22 +22,22 @@ typedef struct __attribute__((packed)) {
     } addr;
 
     struct {
-      int stream_id;
-      int fragment_id;
-      int offset;
-      int fragment_size;
-      int total_size;
+      int32_t stream_id;
+      int32_t fragment_id;
+      int32_t offset;
+      int32_t fragment_size;
+      int32_t total_size;
     } frame;
 
     struct {
-      int id;
+      int32_t id;
     } stream_ping;    
     
     struct {
-      int id;
-      int width;
-      int height;
-      int size;
+      int32_t id;
+      int32_t width;
+      int32_t height;
+      int32_t size;
     } stream_info;
 
     struct {
@@ -45,3 +45,5 @@ typedef struct __attribute__((packed)) {
     } control_data;
   } payload;
 } req_pkg;
+
+
