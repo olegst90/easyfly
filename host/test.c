@@ -1,10 +1,9 @@
 #include <stdio.h>
 #include <unistd.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
 #include <errno.h>
 #include "string.h"
 #include "aeproto.h"
+#include "transport.h"
 
 int write_ppm(const uint8_t *buffer, int dimx, int dimy, const char *path)
 {
@@ -33,30 +32,16 @@ int main(int argc, char **argv)
         return -1;
     }
 
-    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock == -1) {
-        fprintf(stderr, "Could not create socket: %s\n", strerror(errno));
+    struct tr_param tr = {0};
+    tr.type = TR_NETWORK;
+    tr.value.network.remote_ip = argv[1];
+    tr.value.network.remote_port = atoi(argv[2]);
+    tr.value.network.local_port = 45123;
+    thandle h = tr_init(&tr);
+    if (!h) {
+        fprintf(stderr, "Connection failure\n");
         return -1;
     }
-
-    struct sockaddr_in si_local, si_remote;
-    memset((char *) &si_local, 0, sizeof(si_local));
-    si_local.sin_family = AF_INET;
-    si_local.sin_port = 45123;
-    si_local.sin_addr.s_addr = htonl(INADDR_ANY);
-
-    int res = bind(sock, (struct sockaddr*)&si_local, sizeof(si_local));
-    if (res == -1) {
-        fprintf(stderr, "Could not bind socket: %s\n", strerror(errno));
-        goto exit;
-    }
-
-    printf("Connecting to %s:%s\n", argv[1], argv[2]);
-
-    memset((char *) &si_remote, 0, sizeof(si_remote));
-    si_remote.sin_family = AF_INET;
-    si_remote.sin_port = htons(atoi(argv[2]));
-    inet_pton(AF_INET, argv[1], &(si_remote.sin_addr));
 
     uint8_t buffer[64];
     uint8_t *frame = NULL;
@@ -66,8 +51,7 @@ int main(int argc, char **argv)
     memset(pkg, 0, sizeof(pkg));
     pkg->cmd = REQ_ID_GET_STREAM;
 
-    res = sendto(sock, pkg, sizeof(*pkg), 0,
-                     (struct sockaddr_in *)&si_remote, sizeof(si_remote));
+    int res = tr_write(h, pkg, sizeof(*pkg));
     if (res == -1) {
         fprintf(stderr, "Could not send to server: %s\n", strerror(errno));
         goto exit;
@@ -78,9 +62,7 @@ int main(int argc, char **argv)
     int recv_len;
     int repeat_counter = 10; 
     do {
-        int si_remote_size = sizeof(si_remote);
-        recv_len = recvfrom(sock, buffer, sizeof(buffer), 0,
-                           (struct sockaddr *) &si_remote, &si_remote_size);
+        recv_len = tr_read(h, buffer, sizeof(buffer));
         if (recv_len == -1) {
             fprintf(stderr, "Could not read header from server: %d / %s\n", recv_len, strerror(errno));
             goto exit;
@@ -129,8 +111,7 @@ int main(int argc, char **argv)
             printf("pinging stream %d\n", pkg->payload.stream_info.id);
             pkg->cmd = REQ_ID_PING_STREAM;
             
-            res = sendto(sock, pkg, sizeof(*pkg), 0,
-                         (struct sockaddr_in *)&si_remote, sizeof(si_remote));
+            res = tr_write(h, pkg, sizeof(*pkg));
             if (res == -1) {
                 fprintf(stderr, "Could not send to server: %s\n", strerror(errno));
                 goto exit;
@@ -142,6 +123,6 @@ int main(int argc, char **argv)
 
 exit:
     if (frame) free(frame);
-    close(sock);
+    tr_destroy(h);
     return res;
 }

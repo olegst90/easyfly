@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 #define REQ_ID_GET_STREAM        0x1
 #define REQ_ID_PING_STREAM       0x2
 #define REQ_ID_STREAM_FRAME      0x3
