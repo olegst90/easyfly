@@ -12,6 +12,12 @@
 
 #define MAX_PAYLOAD_SIZE         32
 
+// 30 packets
+#define STREAM_TIMEOUT           300
+
+// send stream info every x packets
+#define STREAM_INFO_FREQ         5
+
 typedef struct __attribute__((packed)) {
   uint16_t cmd;
   uint16_t flags;
@@ -24,6 +30,8 @@ typedef struct __attribute__((packed)) {
     struct {
       int32_t stream_id;
       int32_t fragment_id;
+      int32_t frame_id;
+      int32_t line_id;
       int32_t offset;
       int32_t fragment_size;
       int32_t total_size;
@@ -45,5 +53,6 @@ typedef struct __attribute__((packed)) {
     } control_data;
   } payload;
 } req_pkg;
+
 
 

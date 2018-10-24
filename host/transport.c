@@ -29,35 +29,6 @@ struct tr_ctx {
     void (*destroy)(struct tr_ctx *ctx);
 };
 
-
-void DumpHex(const void* data, size_t size) {
-    char ascii[17];
-    size_t i, j;
-    ascii[16] = '\0';
-    for (i = 0; i < size; ++i) {
-        printf("%02X ", ((unsigned char*)data)[i]);
-        if (((unsigned char*)data)[i] >= ' ' && ((unsigned char*)data)[i] <= '~') {
-            ascii[i % 16] = ((unsigned char*)data)[i];
-        } else {
-            ascii[i % 16] = '.';
-        }
-        if ((i+1) % 8 == 0 || i+1 == size) {
-            printf(" ");
-            if ((i+1) % 16 == 0) {
-                printf("|  %s \n", ascii);
-            } else if (i+1 == size) {
-                ascii[(i+1) % 16] = '\0';
-                if ((i+1) % 16 <= 8) {
-                    printf(" ");
-                }
-                for (j = (i+1) % 16; j < 16; ++j) {
-                    printf("   ");
-                }
-                printf("|  %s \n", ascii);
-            }
-       }
-    }
-}
 static ssize_t __write_serial(struct tr_ctx *ctx, const unsigned char *data, size_t data_size)
 {
     uint8_t b = AE_START;
@@ -266,11 +237,13 @@ thandle tr_init(struct tr_param *param)
 
 ssize_t tr_write(thandle h, const unsigned char *data, size_t data_size)
 {
+    //printf("requested write of %d bytes\n", data_size);
     return h->write(h, data, data_size);
 }
 
 ssize_t tr_read(thandle h, unsigned char *data, size_t data_size)
 {
+    //printf("requested read of %d bytes\n", data_size);
     return h->read(h, data, data_size);
 }
 
